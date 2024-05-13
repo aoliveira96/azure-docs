@@ -109,47 +109,7 @@ using Microsoft.Extensions.Configuration;
 using System.Security.Cryptography.X509Certificates;
 ```
 
-Update the `ServiceInstanceListener` to use the new *EndpointHttps* endpoint and listen on port 443. When configuring the web host to use Kestrel server, you must configure Kestrel to listen for IPv6 addresses on all network interfaces: `opt.Listen(IPAddress.IPv6Any, port, listenOptions => {...}`.
-
-```csharp
-new ServiceInstanceListener(
-serviceContext =>
-    new KestrelCommunicationListener(
-        serviceContext,
-        "EndpointHttps",
-        (url, listener) =>
-        {
-            ServiceEventSource.Current.ServiceMessage(serviceContext, $"Starting Kestrel on {url}");
-
-            return new WebHostBuilder()
-                .UseKestrel(opt =>
-                {
-                    int port = serviceContext.CodePackageActivationContext.GetEndpoint("EndpointHttps").Port;
-                    opt.Listen(IPAddress.IPv6Any, port, listenOptions =>
-                    {
-                        listenOptions.UseHttps(FindMatchingCertificateBySubject());
-                        listenOptions.NoDelay = true;
-                    });
-                })
-                .ConfigureAppConfiguration((builderContext, config) =>
-                {
-                    config.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
-                })
-
-                .ConfigureServices(
-                    services => services
-                        .AddSingleton<HttpClient>(new HttpClient())
-                        .AddSingleton<FabricClient>(new FabricClient())
-                        .AddSingleton<StatelessServiceContext>(serviceContext))
-                .UseContentRoot(Directory.GetCurrentDirectory())
-                .UseStartup<Startup>()
-                .UseServiceFabricIntegration(listener, ServiceFabricIntegrationOptions.None)
-                .UseUrls(url)
-                .Build();
-        }))
-```
-
-Also add the following method so that Kestrel can find the certificate in the `Cert:\LocalMachine\My` store using the subject.  
+Add the following method so that Kestrel can find the certificate in the `Cert:\LocalMachine\My` store using the subject.  
 
 Replace "&lt;your_CN_value&gt;" with "mytestcert" if you created a self-signed certificate with the previous PowerShell command, or use the CN of your certificate.
 Be aware that in the case of local deployment to `localhost` it's preferable to use "CN=localhost" to avoid authentication exceptions.
@@ -181,8 +141,45 @@ private X509Certificate2 FindMatchingCertificateBySubject(string subjectCommonNa
         return matchingCerts[0];
     }
 }
+```
 
+Update the `ServiceInstanceListener` to use the new *EndpointHttps* endpoint and listen on port 443. When configuring the web host to use Kestrel server, you must configure Kestrel to listen for IPv6 addresses on all network interfaces: `opt.Listen(IPAddress.IPv6Any, port, listenOptions => {...}`.
 
+```csharp
+new ServiceInstanceListener(
+serviceContext =>
+    new KestrelCommunicationListener(
+        serviceContext,
+        "EndpointHttps",
+        (url, listener) =>
+        {
+            ServiceEventSource.Current.ServiceMessage(serviceContext, $"Starting Kestrel on {url}");
+
+            return new WebHostBuilder()
+                .UseKestrel(opt =>
+                {
+                    int port = serviceContext.CodePackageActivationContext.GetEndpoint("EndpointHttps").Port;
+                    opt.Listen(IPAddress.IPv6Any, port, listenOptions =>
+                    {
+                        listenOptions.UseHttps(FindMatchingCertificateBySubject());
+                    });
+                })
+                .ConfigureAppConfiguration((builderContext, config) =>
+                {
+                    config.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+                })
+
+                .ConfigureServices(
+                    services => services
+                        .AddSingleton<HttpClient>(new HttpClient())
+                        .AddSingleton<FabricClient>(new FabricClient())
+                        .AddSingleton<StatelessServiceContext>(serviceContext))
+                .UseContentRoot(Directory.GetCurrentDirectory())
+                .UseStartup<Startup>()
+                .UseServiceFabricIntegration(listener, ServiceFabricIntegrationOptions.None)
+                .UseUrls(url)
+                .Build();
+        }))
 ```
 
 ## Grant NETWORK SERVICE access to the certificate's private key
@@ -248,55 +245,56 @@ Modify the *Setup.bat* file properties to set **Copy to Output Directory** to "C
 In Solution Explorer, right-click **VotingWeb** and select **Add**->**New Item** and add a new file named "SetCertAccess.ps1".  Edit the *SetCertAccess.ps1* file and add the following script:
 
 ```powershell
-$subject="mytestcert"
-$userGroup="NETWORK SERVICE"
+$subject = "mytestcert"
+$userGroup = "NETWORK SERVICE"
 
 Write-Host "Checking permissions to certificate $subject.." -ForegroundColor DarkCyan
 
 $cert = (gci Cert:\LocalMachine\My\ | where { $_.Subject.Contains($subject) })[-1]
 
-if ($cert -eq $null)
-{
-    $message="Certificate with subject:"+$subject+" does not exist at Cert:\LocalMachine\My\"
-    Write-Host $message -ForegroundColor Red
-    exit 1;
-}elseif($cert.HasPrivateKey -eq $false){
-    $message="Certificate with subject:"+$subject+" does not have a private key"
-    Write-Host $message -ForegroundColor Red
-    exit 1;
-}else
-{
-    $keyName=$cert.PrivateKey.CspKeyContainerInfo.UniqueKeyContainerName
+if ($cert -eq $null) {
+   $message = "Certificate with subject:" + $subject + " does not exist at Cert:\LocalMachine\My\"
+   Write-Host $message -ForegroundColor Red
+   exit 1;
+}
+elseif ($cert.HasPrivateKey -eq $false) {
+   $message = "Certificate with subject:" + $subject + " does not have a private key"
+   Write-Host $message -ForegroundColor Red
+   exit 1;
+}
+else {
+   $keyName = $cert.PrivateKey.CspKeyContainerInfo.UniqueKeyContainerName
 
-    $keyPath = "C:\ProgramData\Microsoft\Crypto\RSA\MachineKeys\"
+   $keyPath = "C:\ProgramData\Microsoft\Crypto\RSA\MachineKeys\"
 
-    if ($keyName -eq $null){
+   if ($keyName -eq $null) {
       $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)      
       $keyName = $privateKey.Key.UniqueName
       $keyPath = "C:\ProgramData\Microsoft\Crypto\Keys"
-    }
+   }
 
-    $fullPath=$keyPath+$keyName
-    $acl=(Get-Item $fullPath).GetAccessControl('Access')
+   $fullPath = $keyPath + $keyName
+   $acl = (Get-Item $fullPath).GetAccessControl('Access')
 
 
-    $hasPermissionsAlready = ($acl.Access | where {$_.IdentityReference.Value.Contains($userGroup.ToUpperInvariant()) -and $_.FileSystemRights -eq [System.Security.AccessControl.FileSystemRights]::FullControl}).Count -eq 1
+   $hasPermissionsAlready = ($acl.Access | where { $_.IdentityReference.Value.Contains($userGroup.ToUpperInvariant()) -and $_.FileSystemRights -eq [System.Security.AccessControl.FileSystemRights]::FullControl }).Count -eq 1
 
-    if ($hasPermissionsAlready){
-        Write-Host "Account $userGroup already has permissions to certificate '$subject'." -ForegroundColor Green
-        return $false;
-    } else {
-        Write-Host "Need add permissions to '$subject' certificate..." -ForegroundColor DarkYellow
+   if ($hasPermissionsAlready) {
+      Write-Host "Account $userGroup already has permissions to certificate '$subject'." -ForegroundColor Green
+      return $false;
+   }
+   else {
+      Write-Host "Need add permissions to '$subject' certificate..." -ForegroundColor DarkYellow
 
-        $permission=$userGroup,"Full","Allow"
-        $accessRule=new-object System.Security.AccessControl.FileSystemAccessRule $permission
-        $acl.AddAccessRule($accessRule)
-        Set-Acl $fullPath $acl
+      $permission = $userGroup, "Full", "Allow"
+      $accessRule = new-object System.Security.AccessControl.FileSystemAccessRule $permission
+      $acl.AddAccessRule($accessRule)
+      Set-Acl $fullPath $acl
 
-        Write-Output "Permissions were added"
+      Write-Output "Permissions were added"
 
-        return $true;
-    }
+      return $true;
+   }
 }
 
 ```
